@@ -1,2 +1,2 @@
 # POMO_CNN
-Scripts to train an CNN to classify pollen images from POMO
+Scripts to train a CNN to classify pollen images from POMO
