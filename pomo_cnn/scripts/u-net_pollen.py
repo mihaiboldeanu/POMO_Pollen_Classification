@@ -61,7 +61,7 @@ val_target_img_paths2 = target_img_paths2[-val_samples:]
 train_gen = lib_pomo.Pollen(batch_size, img_size,
                             train_input_img_paths,
                             train_target_img_paths1,
-                            train_target_img_paths2,augment=True)
+                            train_target_img_paths2,augment=False)
 val_gen = lib_pomo.Pollen(batch_size, img_size,
                           val_input_img_paths,
                           val_target_img_paths1,
@@ -75,7 +75,7 @@ model = lib_pomo.get_model((960,1280,1), 3)
 #model.summary()
 
 adam = Adam(learning_rate=0.00001,
-            beta_1=0.6,
+            beta_1=0.9,
             beta_2=0.999,
             amsgrad=False,
             clipnorm=1) 
@@ -94,17 +94,17 @@ reduce_lr = ReduceLROnPlateau(monitor='val_loss',
                               mode='min',
                               verbose = 1,
                               factor=0.5,
-                              patience=10,
+                              patience=50,
                               cooldown=2,
                               min_lr=0.0000001)
 es = EarlyStopping(monitor='val_loss',
                    mode='min',
                    verbose=1,
-                   patience=100)
+                   patience=200)
 callbacks_list = [checkpoint,reduce_lr,es]
 
-model_old = load_model("u_net_classical-0.01089.hdf5") 
-model.set_weights(model_old.get_weights())
+# model_old = load_model("u_net_classical-0.01089.hdf5") 
+# model.set_weights(model_old.get_weights())
 
 
 enq_real = OrderedEnqueuer(train_gen, use_multiprocessing=False)
@@ -116,7 +116,7 @@ enq_val_real.start(workers=6, max_queue_size=20)
 gen_real = enq_real.get()
 val_real = enq_val_real.get()
 history = model.fit(gen_real,
-                    epochs=500,
+                    epochs=600,
                     steps_per_epoch=len(train_input_img_paths)//batch_size,
                     callbacks=callbacks_list,
                     verbose=1,
