@@ -27,10 +27,11 @@ from scipy.ndimage import rotate
 
 from tensorflow.keras.preprocessing.image import load_img
 from tensorflow.keras.models import Sequential,load_model,Model
-from tensorflow.keras.layers import Conv2D,Dropout,Dense,MaxPooling2D,Activation,Conv2DTranspose
+from tensorflow.keras.layers import Conv2D,Dropout,Dense,MaxPooling2D,Activation,Conv2DTranspose,GlobalAveragePooling2D
 from tensorflow.keras.layers import Input,Flatten,BatchNormalization,Add,add,SeparableConv2D,UpSampling2D
 from tensorflow.keras.callbacks import ModelCheckpoint,EarlyStopping,ReduceLROnPlateau
 from tensorflow.keras.optimizers import Adam,SGD
+from tensorflow.keras import regularizers
 import tensorflow as tf
 from tensorflow.keras.utils import plot_model
 from tensorflow import keras
@@ -167,6 +168,10 @@ def segment_image(array):
         y_max = np.max(indexex[1])+2
         if x_max - x_min >=960  or y_max - y_min >=960:
             continue
+        if y_max>=960:
+            y_max = 959
+        if x_max >= 1280:
+            x_max = 1279
         coord_list.append((x_min,x_max,y_min,y_max))
     
     
@@ -250,11 +255,19 @@ def save_image(x_unet,expanded_mask,file_path):
 def get_one_class(array):
     binary_array = array == 2
     return binary_array
+def check_corners(corners):
+    new_corners = list(corners)
+    if corners[1] >= 960:
+        new_corners[1] = 959
     
+    if corners[3] >= 1280:
+        new_corners[3] = 1279
+    return corners
 def get_crop(image,corners):
     new_image = np.zeros((360,360,1))
-
+    
     im_shape = [corners[1]-corners[0],corners[3]-corners[2]]
+    
     new_image[int(180-im_shape[0]/2):int(180+im_shape[0]/2),int(180-im_shape[1]/2):int(180+im_shape[1]/2),0] = np.array(image)[corners[0]:corners[1],corners[2]:corners[3]]
     return new_image
 
@@ -390,8 +403,8 @@ def get_model(img_size, num_classes):
     ### [First half of the network: downsampling inputs] ###
 
     # Entry block
-    x = Conv2D(32, 3, strides=2, padding="same",kernel_initializer='glorot_normal')(inputs)
-    #x = BatchNormalization()(x)
+    x = Conv2D(32, 3, strides=2, padding="same",use_bias=False,kernel_initializer='glorot_normal')(inputs)
+    x = BatchNormalization()(x)
     x = Activation("relu")(x)
 
     previous_block_activation = x  # Set aside residual
@@ -399,12 +412,12 @@ def get_model(img_size, num_classes):
     # Blocks 1, 2, 3 are identical apart from the feature depth.
     for filters in [32, 64, 128,256]:
         x = Activation("relu")(x)
-        x = Conv2D(filters, 3, padding="same",kernel_initializer='glorot_normal')(x)
-        #x = BatchNormalization()(x)
+        x = Conv2D(filters, 3, padding="same",use_bias=False,kernel_initializer='glorot_normal')(x)
+        x = BatchNormalization()(x)
 
         x = Activation("relu")(x)
-        x = Conv2D(filters, 3, padding="same",kernel_initializer='glorot_normal')(x)
-        #x = BatchNormalization()(x)
+        x = Conv2D(filters, 3, padding="same",use_bias=False,kernel_initializer='glorot_normal')(x)
+        x = BatchNormalization()(x)
 
         x = MaxPooling2D(3, strides=2, padding="same")(x)
 
@@ -419,12 +432,12 @@ def get_model(img_size, num_classes):
 
     for filters in [256,128, 64, 32, 32]:
         x = Activation("relu")(x)
-        x = Conv2DTranspose(filters, 3, padding="same",kernel_initializer='glorot_normal')(x)
-        #x = BatchNormalization()(x)
+        x = Conv2DTranspose(filters, 3, padding="same",use_bias=False,kernel_initializer='glorot_normal')(x)
+        x = BatchNormalization()(x)
 
         x = Activation("relu")(x)
-        x = Conv2DTranspose(filters, 3, padding="same",kernel_initializer='glorot_normal')(x)
-        #x = BatchNormalization()(x)
+        x = Conv2DTranspose(filters, 3, padding="same",use_bias=False,kernel_initializer='glorot_normal')(x)
+        x = BatchNormalization()(x)
 
         x = UpSampling2D(2)(x)
 
@@ -597,7 +610,7 @@ class Pollen_synthetic(keras.utils.Sequence):
         
         while i < self.batch_size:
             
-            part = random.randint(2,32)
+            part = random.randint(10,32)
             
             image = np.zeros((1320,1640))    
             mask =  np.zeros((1320,1640)) 
@@ -617,15 +630,15 @@ class Pollen_synthetic(keras.utils.Sequence):
         
         
         keys = list(pollen_dict.keys())
-        # probabilities = np.array([1/len(keys) for i in range(len(keys))])
-        # probabilities[11] *= 4
-        # probabilities =  probabilities/np.sum(probabilities)
         ret_particles = []
-        #keys = ["junk","alternaria"]
-        while len(ret_particles)<number_examples:
+        
+        while len(ret_particles) < number_examples:
             key = np.random.choice(keys,)
             ret_particles.append([key,random.choice(pollen_dict[key])])
-        
+            
+        for i in range( np.random.randint(0,5)):
+            ret_particles.append(["alternaria",random.choice(pollen_dict['alternaria'])])# Force to have at least one alternaria particle
+       
         return ret_particles
     
 
@@ -677,3 +690,878 @@ class Pollen_synthetic(keras.utils.Sequence):
 def div_to_float(img):
     image=np.array(img)  
     return image/255.
+
+
+def build_cnn(model_id):
+    l1_weight = 1e-6
+    l2_weight = 1e-5
+    # # # ##canonical
+    input_image = Input(shape=(360, 360,1))
+    ###### Multiple configureations may the best one win
+    if model_id==0:
+        x = Conv2D(16, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(16, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(16, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(32, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(32, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(32, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(64, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(128, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+
+
+        x_flat = Flatten()(x)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_flat)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(128,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(64,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
+    if model_id==1:
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(64, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(128, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(256, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(256, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(512, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        # x_dense = GlobalAveragePooling2D()(x)
+        x_flat = Flatten()(x)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_flat)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(128,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(64,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
+    if model_id==2:
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(64, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(128, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(256, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(256, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(512, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x_dense = GlobalAveragePooling2D()(x)
+        
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
+    if model_id==3:
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(64, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(128, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(256, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(256, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(512, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        # x_dense = GlobalAveragePooling2D()(x)
+        x_flat = Flatten()(x)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_flat)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(128,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(64,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
+    if model_id==4:
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(64, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(128, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(256, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(256, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(512, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        # x_dense = GlobalAveragePooling2D()(x)
+        x_flat = Flatten()(x)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_flat)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
+    if model_id==5:
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(64, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(128, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(256, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(256, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(512, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        # x_dense = GlobalAveragePooling2D()(x)
+        x_flat = Flatten()(x)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_flat)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
+    if model_id==6:
+        x = Conv2D(16, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(16, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(16, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(16, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(16, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(16, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(16, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(16, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(16, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(32, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(32, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(32, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(32, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(32, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(64, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(128, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(256, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        # x_dense = GlobalAveragePooling2D()(x)
+        x_flat = Flatten()(x)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_flat)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(128,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(64,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
+    if model_id==7:
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(128, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(256, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(512, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(256, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(512, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        # x_dense = GlobalAveragePooling2D()(x)
+        x_flat = Flatten()(x)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_flat)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(128,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(64,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
+    if model_id==8:
+        x = Conv2D(10, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(10, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(10, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(20, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(20, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(20, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(30, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(30, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(30, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(50, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(50, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(70, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        # x_dense = GlobalAveragePooling2D()(x)
+        x_flat = Flatten()(x)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_flat)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(128,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(64,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
+    if model_id==9:
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(64, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(128, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(256, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+
+        
+        
+        # x_dense = GlobalAveragePooling2D()(x)
+        x_flat = Flatten()(x)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_flat)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(128,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(64,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
+    if model_id==10:
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(128, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(256, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(256, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(256, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x_dense = GlobalAveragePooling2D()(x)
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
+    if model_id==11:
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(64, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(128, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(256, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(256, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(512, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        # x_dense = GlobalAveragePooling2D()(x)
+        x_flat = Flatten()(x)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_flat)
+        x_dense = Dropout(0.5)(x_dense)
+        x_dense = Dense(128,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.5)(x_dense)
+        x_dense = Dense(64,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.5)(x_dense)
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
+    if model_id==12:
+        l1_weight = 1e-5
+        l2_weight = 1e-4
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(64, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(128, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(256, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(256, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(512, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        # x_dense = GlobalAveragePooling2D()(x)
+        x_flat = Flatten()(x)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_flat)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(128,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_dense = Dense(64,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.25)(x_dense)
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
+    if model_id==13:
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(64, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(128, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(256, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(256, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(512, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        # x_dense = GlobalAveragePooling2D()(x)
+        x_flat = Flatten()(x)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_flat)
+        x_dense = Dropout(0.5)(x_dense)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.5)(x_dense)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.5)(x_dense)
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
+    if model_id==14:
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(64, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(128, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(256, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(256, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(512, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        # x_dense = GlobalAveragePooling2D()(x)
+        x_flat = Flatten()(x)
+        x_dense = Dense(512,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_flat)
+        x_dense = Dropout(0.5)(x_dense)
+        x_dense = Dense(512,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.5)(x_dense)
+        x_dense = Dense(512,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.5)(x_dense)
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
+    if model_id==15:
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(64, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(128, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(128, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(256, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(256, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+
+        
+        # x_dense = GlobalAveragePooling2D()(x)
+        x_flat = Flatten()(x)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_flat)
+        x_dense = Dropout(0.5)(x_dense)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.5)(x_dense)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.5)(x_dense)
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
+    if model_id==16:
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(input_image)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(64, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        x = Conv2D(64, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+        
+        
+        
+        x = Conv2D(64, (3, 3),strides=2,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Conv2D(64, (3, 3),strides=1,padding='same',use_bias=False,kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x) 
+    
+        
+        
+        # x_dense = GlobalAveragePooling2D()(x)
+        x_flat = Flatten()(x)
+        x_dense = Dense(256,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_flat)
+        x_dense = Dropout(0.5)(x_dense)
+        x_dense = Dense(128,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.5)(x_dense)
+        x_dense = Dense(64,activation="relu",kernel_initializer="truncated_normal",kernel_regularizer=regularizers.l1_l2(l1=l1_weight, l2=l2_weight))(x_dense)
+        x_dense = Dropout(0.5)(x_dense)
+        x_out = Dense(18)(x_dense)
+        x_out = Activation('softmax',  name='predictions')(x_out)
+        
+        
+        model = Model(input_image,x_out)
+        return model
